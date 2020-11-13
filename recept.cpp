@@ -1,132 +1,98 @@
+#include <cmath>
 #include <cstdint>
 #include <array>
 #include <limits>
 
-#ifndef RING_SIZE
-#define RING_SIZE 16
+#ifndef HALF_LIFE
+#define HALF_LIFE 4
 #endif
 
-template<typename T, int Size>
-class ring {
+template<typename T, int HalfLife>
+class ewma
+{
+    float m_alpha;
+    bool is_empty;
+    float m_value;
 
 public:
 
-	inline void add(const T& value) {
+    ewma(): is_empty(true) { m_alpha = std::exp(std::log(0.5) / HalfLife); }
 
-		if (empty()) {
+    inline void clear() { is_empty = true; }
 
-			fill(value);
-			return;
-		}
+    inline void add(const T& value)
+    {
+        if (is_empty)
+            m_value = value;
+        else
+            m_value = m_alpha * m_value + (1-m_alpha) * value;
 
-		_index = (_index + 1) % Size;
-		const T& oldest = _values[_index];
-		_sum = _sum + value - oldest;
-		_values[_index] = value;
-	}
+        is_empty = false;
+    }
 
-	inline void clear() {
-
-		_sum = std::numeric_limits<T>::max();
-	}
-
-	inline bool empty() const {
-
-		return _sum == std::numeric_limits<T>::max();
-	}
-
-	/**
-	 * Return the last (i.e., newest) item added to the ring.
-	 */
-	inline const T& front() const {
-
-		return _values[_index];
-	}
-
-	inline void fill(const T& value) {
-
-		_values.fill(value);
-		_sum = value*Size;
-	}
-
-	inline T sum() const {
-
-		return _sum;
-	}
-
-	inline T average() const {
-
-		return _sum/Size;
-	}
-
-private:
-
-	std::array<T, Size> _values;
-	uint8_t _index;
-	T _sum;
+    inline T value() const { return m_value; }
 };
 
-static ring<uint32_t, RING_SIZE> ring_x;
-static ring<uint32_t, RING_SIZE> ring_y;
+static ewma<uint32_t, HALF_LIFE> avg_x;
+static ewma<uint32_t, HALF_LIFE> avg_y;
 
-template<typename Ring>
-inline uint32_t update_pos(Ring& ring, uint32_t value) {
-
-	ring.add(value);
-	return ring.average();
+template<typename AverageingMethod>
+inline uint32_t update_pos(AverageingMethod& avgMethod, uint32_t value)
+{
+    avgMethod.add(value);
+    return avgMethod.value();
 }
 
-void filter(char* buf) {
+void filter(char* buf)
+{
+    const uint8_t type = (uint8_t)buf[8];
+    const uint16_t code = (
+            (uint16_t)buf[10]      |
+            (uint16_t)buf[11] << 8);
+    uint32_t value = (
+            (uint32_t)buf[12]       |
+            (uint32_t)buf[13] << 8  |
+            (uint32_t)buf[14] << 16 |
+            (uint32_t)buf[15] << 24);
 
-	const uint8_t type = (uint8_t)buf[8];
-	const uint16_t code = (
-		(uint16_t)buf[10]      |
-		(uint16_t)buf[11] << 8);
-	uint32_t value = (
-		(uint32_t)buf[12]       |
-		(uint32_t)buf[13] << 8  |
-		(uint32_t)buf[14] << 16 |
-		(uint32_t)buf[15] << 24);
+    // type == 1 && code == 320 && value == 1 -> pen in
+    // type == 1 && code == 320 && value == 0 -> pen out
+    // type == 1 && code == 321 && value == 1 -> eraser in
+    // type == 1 && code == 321 && value == 0 -> eraser out
+    //
+    // type == 1 && code == 330 && value == 1 -> pen/eraser down
+    // type == 1 && code == 330 && value == 0 -> pen/eraser up
+    //
+    // type == 3 && code == 0 -> value == x
+    // type == 3 && code == 1 -> value == y
+    // type == 3 && code == 24 -> value == pressure
+    // type == 3 && code == 25 -> value == distance
+    // type == 3 && code == 26 -> value == tilt x
+    // type == 3 && code == 27 -> value == tilt y
 
-	// type == 1 && code == 320 && value == 1 -> pen in
-	// type == 1 && code == 320 && value == 0 -> pen out
-	// type == 1 && code == 321 && value == 1 -> eraser in
-	// type == 1 && code == 321 && value == 0 -> eraser out
-	//
-	// type == 1 && code == 330 && value == 1 -> pen/eraser down
-	// type == 1 && code == 330 && value == 0 -> pen/eraser up
-	//
-	// type == 3 && code == 0 -> value == x
-	// type == 3 && code == 1 -> value == y
-	// type == 3 && code == 24 -> value == pressure
-	// type == 3 && code == 25 -> value == distance
-	// type == 3 && code == 26 -> value == tilt x
-	// type == 3 && code == 27 -> value == tilt y
+    // pen/eraser in
+    if (type == 1 && ((code == 320 && value == 1) || (code == 321 && value == 1))) {
 
-	// pen/eraser in
-	if (type == 1 && ((code == 320 && value == 1) || (code == 321 && value == 1))) {
+            avg_x.clear();
+            avg_y.clear();
+    }
 
-		ring_x.clear();
-		ring_y.clear();
-	}
+    if (type == 3)
+    {
+        if (code == 0)
+        {
+            value = update_pos(avg_x, value);
+        } else if (code == 1)
+        {
+            value = update_pos(avg_y, value);
+        }
 
-	if (type == 3) {
-
-		if (code == 0) {
-
-			value = update_pos(ring_x, value);
-
-		} else if (code == 1) {
-
-			value = update_pos(ring_y, value);
-		}
-
-		// copy value back to buffer
-		buf[12] = (uint8_t)value;
-		buf[13] = (uint8_t)(value >> 8);
-		buf[14] = (uint8_t)(value >> 16);
-		buf[15] = (uint8_t)(value >> 24);
-	}
+        // copy value back to buffer
+        buf[12] = (uint8_t)value;
+        buf[13] = (uint8_t)(value >> 8);
+        buf[14] = (uint8_t)(value >> 16);
+        buf[15] = (uint8_t)(value >> 24);
+    }
 }
 
 extern "C" {

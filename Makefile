@@ -6,7 +6,7 @@ compile:
 	for rs in `seq 2 32`; \
 	do \
 		arm-oe-linux-gnueabi-g++ \
-			-DRING_SIZE=$$rs \
+			-DHALF_LIFE=$$rs \
 			-march=armv7-a \
 			-mfpu=neon \
 			-mfloat-abi=hard \
